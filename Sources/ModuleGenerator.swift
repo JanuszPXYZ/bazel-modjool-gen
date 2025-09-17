@@ -145,20 +145,10 @@ struct ModuleGenerator {
 
         if generatePair {
             let publicDir = "\(workspaceRoot)/\(moduleName)Public/Sources"
-            log("📁 Creating directory: \(privateDir)")
+            log("📁 Creating directory: \(publicDir)")
             if !dryRun {
                 try fileManager.createDirectory(atPath: publicDir, withIntermediateDirectories: true)
             }
-        }
-
-
-        log("📁 Creating directories:")
-        log("   \(privateDir)")
-        log("   \(publicDir)")
-
-        if !dryRun {
-            try fileManager.createDirectory(atPath: privateDir, withIntermediateDirectories: true)
-            try fileManager.createDirectory(atPath: publicDir, withIntermediateDirectories: true)
         }
     }
 
@@ -234,9 +224,12 @@ struct ModuleGenerator {
         let privateLabel = "\"//\(privateDep):\(privateDep)\","
 
         var wantedEntries: [String] = [privateDep]
+        var publicLabel: String?
         if let publicDep = publicDep {
-            let publicLabel = "\"//\(publicDep)Public:\(publicDep)Public\","
-            wantedEntries.append(publicLabel)
+            publicLabel = "\"//\(publicDep)Public:\(publicDep)Public\","
+            if let publicLabel = publicLabel {
+                wantedEntries.append(publicLabel)
+            }
         }
 
         // 1) Find topmost swift_library rule in the root BUILD.bazel
@@ -253,7 +246,7 @@ struct ModuleGenerator {
         guard let topSwiftLib = swiftLibRanges.min(by: { $0.start < $1.start }) else {
             // No swift_library found -> fallback to patch
             log("⚠️  No swift_library found in root BUILD.bazel. Writing suggested patch.")
-            try writePatchOrPrint(privateLabel: privateLabel, publicLabel: publicLabel)
+            try writePatchOrPrint(privateLabel: privateLabel, publicLabel: publicLabel ?? "")
             return
         }
 
@@ -275,9 +268,16 @@ struct ModuleGenerator {
         if !didChange {
             let snippet = updatedLines[topSwiftLib.start...topSwiftLib.end].joined(separator: "\n")
             // If both labels are already somewhere in the swift_library, nothing to do.
-            if snippet.contains(privateLabel) || snippet.contains(publicLabel) {
-                log("No changes needed; labels already present in top swift_library.")
-                return
+            if generatePair {
+                if snippet.contains(privateLabel) || snippet.contains(publicLabel!) {
+                    log("No changes needed; labels already present in top swift_library.")
+                    return
+                }
+            } else {
+                if snippet.contains(privateLabel) {
+                    log("No changes needed; labels already present in top swift_library.")
+                    return
+                }
             }
 
             // Ensure parameter separation: add trailing comma to previous non-empty parameter line if missing
@@ -297,13 +297,21 @@ struct ModuleGenerator {
             let closingLine = updatedLines[topSwiftLib.end]
             let indentPrefix = String(closingLine.prefix { $0 == " " || $0 == "\t" })
             let innerIndent = indentPrefix + "    "
-
-            let depsBlock = [
-                indentPrefix + "deps = [",
-                innerIndent + privateLabel,
-                innerIndent + publicLabel,
-                indentPrefix + "],"
-            ]
+            var depsBlock: [String] = []
+            if generatePair {
+                depsBlock = [
+                    indentPrefix + "deps = [",
+                    innerIndent + privateLabel,
+                    innerIndent + publicLabel!,
+                    indentPrefix + "],"
+                ]
+            } else {
+                depsBlock = [
+                    indentPrefix + "deps = [",
+                    innerIndent + privateLabel,
+                    indentPrefix + "],"
+                ]
+            }
             // Insert the block right before the closing ')' line of the swift_library
             updatedLines.insert(contentsOf: depsBlock, at: topSwiftLib.end)
             didChange = true
@@ -442,14 +450,25 @@ struct ModuleGenerator {
         log("💾 Backup of BUILD.bazel written to: \(backupPath)")
     }
 
-    private func writePatchOrPrint(privateLabel: String, publicLabel: String) throws {
-        let patch = """
+    private func writePatchOrPrint(privateLabel: String, publicLabel: String?) throws {
+        var patch: String
+
+        if generatePair {
+            patch = """
         # Modjool suggested snippet - add these to the swift_library deps in your root BUILD.bazel:
         deps = [
             \(privateLabel)
-            \(publicLabel)
+            \(publicLabel!)
         ]
         """
+        } else {
+            patch = """
+        # Modjool suggested snippet - add these to the swift_library deps in your root BUILD.bazel:
+        deps = [
+            \(privateLabel)
+        ]
+        """
+        }
         let patchPath = "\(workspaceRoot)/BUILD.bazel.modjool.patch"
         if dryRun {
             print("\n--- Suggested BUILD.bazel patch ---\n")
