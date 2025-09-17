@@ -31,9 +31,34 @@ struct BuildFileTemplates {
         )
         """
     }
+
+    static func singleBuildFile(moduleName: String) -> String {
+        return """
+        load("@rules_swift//swift:swift.bzl", "swift_library")
+
+        swift_library(
+            name = "\(moduleName)",
+            module_name = "\(moduleName)",
+            srcs = glob(["Sources/*.swift"]),
+            visibility = ["//:__pkg__"],
+        )
+        """
+    }
 }
 
 struct SwiftTemplates {
+
+    static func singleImplementation(moduleName: String, template: ModuleTemplate) -> String {
+        return """
+        import Foundation
+
+        // TODO: Implement \(moduleName)
+        public struct \(moduleName) {
+            public init() {}
+        }
+        """
+    }
+
     static func publicInterface(moduleName: String, template: ModuleTemplate) -> String {
         switch template {
         case .feature:

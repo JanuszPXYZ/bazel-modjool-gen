@@ -6,6 +6,7 @@ struct ModuleGenerator {
     let workspaceRoot: String
     let verbose: Bool
     let dryRun: Bool
+    let generatePair: Bool
 
     private let fileManager = FileManager.default
 
@@ -23,14 +24,32 @@ struct ModuleGenerator {
         try createDirectories()
 
         // Generate BUILD.bazel files
-        try generatePrivateBuildFile() // MARK: First test without templates!!!!
-        try generatePublicBuildFile()
+        if generatePair {
+            try generatePrivateBuildFile() // MARK: First test without templates!!!!
+            try generatePublicBuildFile()
+        } else {
+            try generateSingleBuildFile()
+        }
 
         // Generate Swift files based on template
-        try generateTemplateFiles()
+        if generatePair {
+            try generateTemplateFiles()
+        } else {
+            let content = SwiftTemplates.singleImplementation(moduleName: moduleName, template: template)
+            let filePath = "\(workspaceRoot)/\(moduleName)/Sources/\(moduleName).swift"
+            log("📝 Generating \(filePath)")
+            if !dryRun {
+                try content.write(toFile: filePath, atomically: true, encoding: .utf8)
+            }
+        }
 
         // Update main BUILD.bazel
-        try updateMainBuildFile()
+        if generatePair {
+            try updateMainBuildFile(privateDep: "//\(moduleName):\(moduleName)",
+                                    publicDep: "//\(moduleName)Public:\(moduleName)Public")
+        } else {
+            try updateMainBuildFile(privateDep: "//\(moduleName):\(moduleName)", publicDep: nil)
+        }
 
         printSuccessMessage()
     }
@@ -118,7 +137,20 @@ struct ModuleGenerator {
 
     private func createDirectories() throws {
         let privateDir = "\(workspaceRoot)/\(moduleName)/Sources"
-        let publicDir = "\(workspaceRoot)/\(moduleName)Public/Sources"
+        log("📁 Creating directory: \(privateDir)")
+
+        if !dryRun {
+            try fileManager.createDirectory(atPath: privateDir, withIntermediateDirectories: true)
+        }
+
+        if generatePair {
+            let publicDir = "\(workspaceRoot)/\(moduleName)Public/Sources"
+            log("📁 Creating directory: \(privateDir)")
+            if !dryRun {
+                try fileManager.createDirectory(atPath: publicDir, withIntermediateDirectories: true)
+            }
+        }
+
 
         log("📁 Creating directories:")
         log("   \(privateDir)")
@@ -131,6 +163,17 @@ struct ModuleGenerator {
     }
 
     // MARK: BUILD File Generation
+
+    private func generateSingleBuildFile() throws {
+        let content = BuildFileTemplates.singleBuildFile(moduleName: moduleName)
+        let filePath = "\(workspaceRoot)/\(moduleName)/BUILD.bazel"
+
+        log("📝 Generating \(filePath)")
+        if !dryRun {
+            try content.write(toFile: filePath, atomically: true, encoding: .utf8)
+        }
+    }
+
     private func generatePrivateBuildFile() throws {
         let content = BuildFileTemplates.privateBuildFile(moduleName: moduleName)
         let filePath = "\(workspaceRoot)/\(moduleName)/BUILD.bazel"
@@ -178,53 +221,243 @@ struct ModuleGenerator {
         }
     }
 
-    private func updateMainBuildFile() throws {
+    private func updateMainBuildFile(privateDep: String, publicDep: String?) throws {
         let buildFilePath = "\(workspaceRoot)/BUILD.bazel"
-
         guard fileManager.fileExists(atPath: buildFilePath) else {
             log("⚠️  Warning: BUILD.bazel not found. Please manually add dependencies.")
             return
         }
 
-        let content = try String(contentsOfFile: buildFilePath)
+        let originalContent = try String(contentsOfFile: buildFilePath)
+        let lines = originalContent.components(separatedBy: .newlines)
 
-        // Find the AppLib deps section and add new dependencies
-        let newDependencies = """
-        "//\(moduleName):\(moduleName)",
-        "//\(moduleName)Public:\(moduleName)Public",
-        """
+        let privateLabel = "\"//\(privateDep):\(privateDep)\","
 
-        // Find focused_targets section and add new targets
-        let newFocusedTargets = """
-        "//\(moduleName):\(moduleName)",
-        "//\(moduleName)Public:\(moduleName)Public",
-        """
-
-        var updatedContent = content
-        var wasUpdated = false
-
-        // Add to dependencies (look for a deps parameter)
-
-        if content.contains("deps = [") {
-            updatedContent = updatedContent.replacingOccurrences(
-                of: "focused_targets = [",
-                with: "focused_targets = [\n        \(newFocusedTargets)"
-            )
-            wasUpdated = true
+        var wantedEntries: [String] = [privateDep]
+        if let publicDep = publicDep {
+            let publicLabel = "\"//\(publicDep)Public:\(publicDep)Public\","
+            wantedEntries.append(publicLabel)
         }
 
-        if wasUpdated {
-            log("📝 Updating BUILD.bazel with new dependencies")
-
-            if !dryRun {
-                try updatedContent.write(toFile: buildFilePath, atomically: true, encoding: .utf8)
+        // 1) Find topmost swift_library rule in the root BUILD.bazel
+        var swiftLibRanges: [(start: Int, end: Int)] = []
+        for i in 0..<lines.count {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("swift_library(") {
+                if let r = findParenthesesRange(in: lines, startingAt: i) {
+                    swiftLibRanges.append(r)
+                }
             }
-        } else {
-            log("⚠️  Warning: Could not auto-update BUILD.bazel. Please manually add:")
-            log("   Dependencies: \(newDependencies)")
-            log("   Focused targets: \(newFocusedTargets)")
         }
 
+        guard let topSwiftLib = swiftLibRanges.min(by: { $0.start < $1.start }) else {
+            // No swift_library found -> fallback to patch
+            log("⚠️  No swift_library found in root BUILD.bazel. Writing suggested patch.")
+            try writePatchOrPrint(privateLabel: privateLabel, publicLabel: publicLabel)
+            return
+        }
+
+        // 2) Try to insert into an existing deps = [ ... ] block inside that swift_library
+        var updatedLines = lines
+        var didChange = false
+        for i in topSwiftLib.start...topSwiftLib.end {
+            if updatedLines[i].contains("deps") && updatedLines[i].contains("=") {
+                if let (listStart, listEnd) = findBracketedRange(in: updatedLines, startingAt: i) {
+                    if insertEntriesIntoList(lines: &updatedLines, startLine: listStart, endLine: listEnd, entries: wantedEntries) {
+                        didChange = true
+                    }
+                }
+                break
+            }
+        }
+
+        // 3) If no deps block existed or we didn't change anything, create deps block before the closing ')' of the swift_library
+        if !didChange {
+            let snippet = updatedLines[topSwiftLib.start...topSwiftLib.end].joined(separator: "\n")
+            // If both labels are already somewhere in the swift_library, nothing to do.
+            if snippet.contains(privateLabel) || snippet.contains(publicLabel) {
+                log("No changes needed; labels already present in top swift_library.")
+                return
+            }
+
+            // Ensure parameter separation: add trailing comma to previous non-empty parameter line if missing
+            var prevIdx = topSwiftLib.end - 1
+            while prevIdx >= topSwiftLib.start &&
+                  updatedLines[prevIdx].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                prevIdx -= 1
+            }
+            if prevIdx >= topSwiftLib.start {
+                let trimmed = updatedLines[prevIdx].trimmingCharacters(in: .whitespaces)
+                if !trimmed.hasSuffix(",") {
+                    updatedLines[prevIdx] = updatedLines[prevIdx] + ","
+                }
+            }
+
+            // Determine indentation from closing parenthesis line
+            let closingLine = updatedLines[topSwiftLib.end]
+            let indentPrefix = String(closingLine.prefix { $0 == " " || $0 == "\t" })
+            let innerIndent = indentPrefix + "    "
+
+            let depsBlock = [
+                indentPrefix + "deps = [",
+                innerIndent + privateLabel,
+                innerIndent + publicLabel,
+                indentPrefix + "],"
+            ]
+            // Insert the block right before the closing ')' line of the swift_library
+            updatedLines.insert(contentsOf: depsBlock, at: topSwiftLib.end)
+            didChange = true
+        }
+
+        // 4) Write results or show dry-run diff, with backup
+        if didChange {
+            log("📝 Updating BUILD.bazel (top swift_library deps)")
+            if dryRun {
+                showDiff(original: lines, updated: updatedLines)
+                return
+            } else {
+                try backupFile(at: buildFilePath)
+                let newContents = updatedLines.joined(separator: "\n")
+                try newContents.write(toFile: buildFilePath, atomically: true, encoding: .utf8)
+                log("✅ BUILD.bazel updated (top swift_library).")
+                return
+            }
+        }
+
+        // 5) Fallback: nothing changed (should be rare)
+        log("⚠️  Could not modify BUILD.bazel automatically. Writing suggested patch.")
+        try writePatchOrPrint(privateLabel: privateLabel, publicLabel: publicLabel)
+    }
+
+    private func findParenthesesRange(in lines: [String], startingAt startIndex: Int) -> (start: Int, end: Int)? {
+        var depth = 0
+        for i in startIndex..<lines.count {
+            let line = lines[i]
+            for ch in line {
+                if ch == "(" {
+                    depth += 1
+                } else if ch == ")" {
+                    depth -= 1
+                    if depth == 0 {
+                        return (startIndex, i)
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func findBracketedRange(in lines: [String], startingAt startIndex: Int) -> (start: Int, end: Int)? {
+        var depth = 0
+        var startLine: Int? = nil
+        for i in startIndex..<lines.count {
+            let line = lines[i]
+            for ch in line {
+                if ch == "[" {
+                    if startLine == nil { startLine = i }
+                    depth += 1
+                } else if ch == "]" {
+                    depth -= 1
+                    if depth == 0, let s = startLine {
+                        return (s, i)
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func insertEntriesIntoList(lines: inout [String], startLine: Int, endLine: Int, entries: [String]) -> Bool {
+
+        let snippet = lines[startLine...endLine].joined(separator: "\n")
+        var anyMissing = false
+        for e in entries {
+            if !snippet.contains(e) { anyMissing = true; break }
+        }
+        if !anyMissing { return false }
+
+
+        let closingLine = lines[endLine]
+        let indentPrefix = String(closingLine.prefix { $0 == " " || $0 == "\t" })
+        let padding = indentPrefix + "    "
+
+        var insertLines: [String] = []
+        for e in entries {
+            if snippet.contains(e) { continue }
+            insertLines.append(padding + e)
+        }
+        if insertLines.isEmpty { return false }
+
+        lines.insert(contentsOf: insertLines, at: endLine)
+        return true
+    }
+
+    private func showDiff(original: [String], updated: [String]) {
+        let maxIndex = max(original.count, updated.count)
+        var firstDiff: Int? = nil
+        for i in 0..<maxIndex {
+            let o = i < original.count ? original[i] : nil
+            let n = i < updated.count ? updated[i] : nil
+            if o != n { firstDiff = i; break }
+        }
+        guard let start = firstDiff else {
+            log("No changes to BUILD.bazel (dry run).")
+            return
+        }
+
+        var lastDiff = start
+        var i = maxIndex - 1
+        while i >= 0 {
+            let o = i < original.count ? original[i] : nil
+            let n = i < updated.count ? updated[i] : nil
+            if o != n { lastDiff = i; break }
+            i -= 1
+        }
+
+        let contextStart = max(0, start - 3)
+        let contextEnd = min(maxIndex - 1, lastDiff + 3)
+
+        print("\n--- BUILD.bazel (preview) ---\n")
+        for idx in contextStart...contextEnd {
+            let o = idx < original.count ? original[idx] : ""
+            let n = idx < updated.count ? updated[idx] : ""
+            if o != n {
+                print("- \(o)")
+                print("+ \(n)")
+            } else {
+                print("  \(o)")
+            }
+        }
+        print("\n--- end preview ---\n")
+    }
+
+    private func backupFile(at path: String) throws {
+        let dateFormatter = ISO8601DateFormatter()
+        let stamp = dateFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let backupPath = "\(path).modjool.bak.\(stamp)"
+        if fileManager.fileExists(atPath: backupPath) {
+            try? fileManager.removeItem(atPath: backupPath)
+        }
+        try fileManager.copyItem(atPath: path, toPath: backupPath)
+        log("💾 Backup of BUILD.bazel written to: \(backupPath)")
+    }
+
+    private func writePatchOrPrint(privateLabel: String, publicLabel: String) throws {
+        let patch = """
+        # Modjool suggested snippet - add these to the swift_library deps in your root BUILD.bazel:
+        deps = [
+            \(privateLabel)
+            \(publicLabel)
+        ]
+        """
+        let patchPath = "\(workspaceRoot)/BUILD.bazel.modjool.patch"
+        if dryRun {
+            print("\n--- Suggested BUILD.bazel patch ---\n")
+            print(patch)
+        } else {
+            try patch.write(toFile: patchPath, atomically: true, encoding: .utf8)
+            log("📄 Patch written to: \(patchPath)")
+        }
     }
 
     private func printSuccessMessage() {

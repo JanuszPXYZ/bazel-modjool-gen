@@ -25,6 +25,10 @@ struct BazelModjoolGen: ParsableCommand {
     @Argument(help: "Name of the module to generate (e.g., UserProfile, PaymentService")
     var moduleName: String
 
+    @Flag(name: [.customShort("g"), .customLong("generatePair")],
+          help: "Generate both a private and public module (default is single module)")
+    var generatePair: Bool = false
+
     @Option(name: .shortAndLong, help: "Template type to use")
     var template: ModuleTemplate = .feature
 
@@ -46,7 +50,8 @@ struct BazelModjoolGen: ParsableCommand {
             template: template,
             workspaceRoot: workspace,
             verbose: verbose,
-            dryRun: dryRun
+            dryRun: dryRun,
+            generatePair: generatePair
         )
 
         try generator.generate()
@@ -91,5 +96,3 @@ enum ModuleTemplate: String, CaseIterable, ExpressibleByArgument {
         }
     }
 }
-
-
