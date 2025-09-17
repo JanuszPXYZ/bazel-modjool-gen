@@ -45,10 +45,11 @@ struct ModuleGenerator {
 
         // Update main BUILD.bazel
         if generatePair {
-            try updateMainBuildFile(privateDep: "//\(moduleName):\(moduleName)",
-                                    publicDep: "//\(moduleName)Public:\(moduleName)Public")
+            try updateMainBuildFile(privateDep: moduleName,
+                                    publicDep: moduleName)
+
         } else {
-            try updateMainBuildFile(privateDep: "//\(moduleName):\(moduleName)", publicDep: nil)
+            try updateMainBuildFile(privateDep: moduleName, publicDep: nil)
         }
 
         printSuccessMessage()
@@ -220,10 +221,12 @@ struct ModuleGenerator {
 
         let originalContent = try String(contentsOfFile: buildFilePath)
         let lines = originalContent.components(separatedBy: .newlines)
+//        let privateLabel = "\"//\(moduleName):\(moduleName)\","
+//           let publicLabel = "\"//\(moduleName)Public:\(moduleName)Public\","
 
         let privateLabel = "\"//\(privateDep):\(privateDep)\","
 
-        var wantedEntries: [String] = [privateDep]
+        var wantedEntries: [String] = [privateLabel]
         var publicLabel: String?
         if let publicDep = publicDep {
             publicLabel = "\"//\(publicDep)Public:\(publicDep)Public\","
