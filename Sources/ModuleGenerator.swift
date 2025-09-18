@@ -221,8 +221,6 @@ struct ModuleGenerator {
 
         let originalContent = try String(contentsOfFile: buildFilePath)
         let lines = originalContent.components(separatedBy: .newlines)
-//        let privateLabel = "\"//\(moduleName):\(moduleName)\","
-//           let publicLabel = "\"//\(moduleName)Public:\(moduleName)Public\","
 
         let privateLabel = "\"//\(privateDep):\(privateDep)\","
 
