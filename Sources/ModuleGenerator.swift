@@ -25,7 +25,7 @@ struct ModuleGenerator {
 
         // Generate BUILD.bazel files
         if generatePair {
-            try generatePrivateBuildFile() // MARK: First test without templates!!!!
+            try generatePrivateBuildFile()
             try generatePublicBuildFile()
         } else {
             try generateSingleBuildFile()
@@ -253,7 +253,6 @@ struct ModuleGenerator {
             return
         }
 
-        // 2) Try to insert into an existing deps = [ ... ] block inside that swift_library
         var updatedLines = lines
         var didChange = false
         for i in topSwiftLib.start...topSwiftLib.end {
@@ -267,7 +266,6 @@ struct ModuleGenerator {
             }
         }
 
-        // 3) If no deps block existed or we didn't change anything, create deps block before the closing ')' of the swift_library
         if !didChange {
             let snippet = updatedLines[topSwiftLib.start...topSwiftLib.end].joined(separator: "\n")
             // If both labels are already somewhere in the swift_library, nothing to do.
@@ -283,7 +281,6 @@ struct ModuleGenerator {
                 }
             }
 
-            // Ensure parameter separation: add trailing comma to previous non-empty parameter line if missing
             var prevIdx = topSwiftLib.end - 1
             while prevIdx >= topSwiftLib.start &&
                   updatedLines[prevIdx].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -296,7 +293,6 @@ struct ModuleGenerator {
                 }
             }
 
-            // Determine indentation from closing parenthesis line
             let closingLine = updatedLines[topSwiftLib.end]
             let indentPrefix = String(closingLine.prefix { $0 == " " || $0 == "\t" })
             let innerIndent = indentPrefix + "    "
@@ -315,12 +311,11 @@ struct ModuleGenerator {
                     indentPrefix + "],"
                 ]
             }
-            // Insert the block right before the closing ')' line of the swift_library
+
             updatedLines.insert(contentsOf: depsBlock, at: topSwiftLib.end)
             didChange = true
         }
 
-        // 4) Write results or show dry-run diff, with backup
         if didChange {
             log("📝 Updating BUILD.bazel (top swift_library deps)")
             if dryRun {
@@ -335,7 +330,7 @@ struct ModuleGenerator {
             }
         }
 
-        // 5) Fallback: nothing changed (should be rare)
+        // MARK: Fallback mechanism: nothing changed (relatively rare)
         log("⚠️  Could not modify BUILD.bazel automatically. Writing suggested patch.")
         try writePatchOrPrint(privateLabel: privateLabel, publicLabel: publicLabel)
     }
