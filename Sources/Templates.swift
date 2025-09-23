@@ -102,7 +102,7 @@ struct SwiftTemplates {
             public let title: String
             public let isDebugMode: Bool
         
-            public init(title: String: "\(moduleName), isDebugMode: Bool = false) {
+            public init(title: "\(moduleName)", isDebugMode: Bool = false) {
                 self.title = title
                 self.isDebugMode = isDebugMode
             }
